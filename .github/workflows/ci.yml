@@ -134,12 +134,27 @@ jobs:
       - name: Build
         run: npm run build:ci
 
-      # Upload the standalone output as an artifact so it can be deployed
-      # from a subsequent release/deploy workflow without rebuilding.
+      # Verify Next.js wrote its output before attempting the upload.
+      # A successful `next build` must always create .next/ — if it is missing
+      # the build step silently failed and we want a clear error here.
+      - name: Verify build output
+        run: |
+          if [ ! -d ".next" ]; then
+            echo "::error::.next/ directory not found after build — next build may have failed silently"
+            exit 1
+          fi
+          echo "Build output verified: $(du -sh .next | cut -f1)"
+          echo "Contents: $(ls .next)"
+
+      # Upload standalone output for downstream deploy workflows.
+      # Cache is excluded (large, not needed at deploy time).
+      # if-no-files-found: warn — the real compile gate is the Build step above.
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: nextjs-build-${{ github.sha }}
-          path: .next/
+          path: |
+            .next/
+            !.next/cache/**
           retention-days: 3
-          if-no-files-found: error
+          if-no-files-found: warn
