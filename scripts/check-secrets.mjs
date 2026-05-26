@@ -94,7 +94,7 @@ const SAFE_PATTERNS = [
   /replace-with/i,
   /your[_-]?secret/i,
   /placeholder/i,
-  /example\.com/,
+  /^example\.com$/i,
   /\bfoo\b|\bbar\b|\bbaz\b/,
   /TODO/,
 ]
