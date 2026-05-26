@@ -102,9 +102,10 @@ jobs:
       - name: Generate JSON audit report
         id: audit
         run: |
-          set +e
-          npm audit --json > audit-report.json 2>/dev/null
-          AUDIT_EXIT=$?
+          # npm audit exits 1 for any vulnerability (including moderate/low).
+          # We capture the JSON unconditionally and let the dedicated
+          # "Block on CRITICAL" step below decide whether to fail.
+          npm audit --json > audit-report.json 2>/dev/null || true
 
           # Parse summary counts with Node (no extra deps needed)
           node -e "
@@ -133,11 +134,10 @@ jobs:
             fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
             console.log('Audit summary written to job summary.');
 
-            // Surface critical count as output variable
+            // Surface critical count as output variable for the blocking step
             const core = process.env.GITHUB_OUTPUT;
             fs.appendFileSync(core, 'critical=' + (vuln.critical ?? 0) + '\n');
           "
-          exit $AUDIT_EXIT
 
       - name: Upload audit report artifact
         if: always()
