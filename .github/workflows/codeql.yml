@@ -1,0 +1,75 @@
+name: CodeQL
+
+# SAST (Static Application Security Testing) via GitHub's CodeQL engine.
+# Results appear in the repository's Security → Code scanning tab.
+#
+# Detects:
+#   - Injection vulnerabilities (SQL, command, path traversal)
+#   - XSS (client-side and DOM-based)
+#   - Prototype pollution
+#   - Insecure use of crypto / random
+#   - Open redirect
+#   - Unsafe deserialization
+#   - Regex DoS (ReDoS)
+#   - Hardcoded credentials (secondary to our own scanner)
+#   - And 50+ more CWEs in the security-extended query suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Every Monday at 09:00 UTC (1 h after the security.yml scan)
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
+  # Required to upload SARIF results to the Security tab
+  security-events: write
+  # Required to fetch internal or private CodeQL packs
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # javascript-typescript covers .ts, .tsx, .js, .jsx, .mjs, .cjs
+        language: [javascript-typescript]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Initialize CodeQL ──────────────────────────────────────────────────
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # security-extended adds ~30 additional CWE checks on top of the
+          # default suite. security-and-quality also checks for code quality.
+          queries: security-extended,security-and-quality
+          # Only analyze application source — skip generated files and deps.
+          paths-ignore: |
+            node_modules
+            .next
+            dist
+            build
+            **/*.test.ts
+            **/*.spec.ts
+
+      # ── No build step needed for TypeScript ───────────────────────────────
+      # CodeQL analyzes TypeScript source directly without compilation.
+      # If you add a compiled language (e.g. Go, Java), add a build step here.
+
+      # ── Perform analysis ──────────────────────────────────────────────────
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+          # Uploads SARIF to the Security tab — findings appear as PR annotations
+          # and in the repository Security → Code scanning alerts page.
+          upload: always

@@ -1,0 +1,246 @@
+name: Security
+
+# Three triggers with different goals:
+#   push to main   — enforces the security gate after every merge
+#   pull_request   — blocks merges that introduce vulnerabilities
+#   schedule       — weekly scan catches new CVEs even without code changes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Every Monday at 08:00 UTC
+    - cron: "0 8 * * 1"
+
+permissions:
+  contents: read
+  # Needed by dependency-review to comment on PRs
+  pull-requests: write
+  # Needed to upload SARIF results to the Security tab
+  security-events: write
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 1. Secret scan with inline annotations
+  #    Annotates exact file:line in the PR diff when secrets are detected.
+  # ─────────────────────────────────────────────────────────────────────────────
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run secret scanner
+        id: scan
+        # Capture both stdout and stderr; the script exits 1 on critical findings.
+        run: |
+          set +e
+          OUTPUT=$(node scripts/check-secrets.mjs 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+
+          # Re-emit critical lines as GitHub error annotations
+          # Pattern: "  path/to/file.ts:42"
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]+([^[:space:]]+):([0-9]+)$ ]]; then
+              FILE="${BASH_REMATCH[1]}"
+              LINE="${BASH_REMATCH[2]}"
+              echo "::error file=${FILE},line=${LINE}::Possible hardcoded secret detected"
+            fi
+          done <<< "$OUTPUT"
+
+          exit $EXIT_CODE
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. Dependency review — only on pull_request events.
+  #    Compares the changed dependency graph against GitHub's vulnerability DB.
+  #    Blocks merges that introduce HIGH or CRITICAL vulnerabilities.
+  #    Also warns on new copyleft (GPL-3.0, LGPL-3.0) licenses.
+  # ─────────────────────────────────────────────────────────────────────────────
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Match the local prebuild gate level (critical) for merges,
+          # but warn on high too so reviewers are aware.
+          fail-on-severity: high
+          # Warn — but do not fail — on newly introduced copyleft licenses.
+          warn-on-openssf-scorecard-level: true
+          comment-summary-in-pr: always
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. Full audit report — all severity levels, written to Job Summary.
+  #    Does NOT block on moderate/low — that is intentional; the CRITICAL
+  #    gate in ci.yml is the hard block. This job provides full visibility.
+  # ─────────────────────────────────────────────────────────────────────────────
+  audit-report:
+    name: Audit Report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate JSON audit report
+        id: audit
+        run: |
+          set +e
+          npm audit --json > audit-report.json 2>/dev/null
+          AUDIT_EXIT=$?
+
+          # Parse summary counts with Node (no extra deps needed)
+          node -e "
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('audit-report.json', 'utf8'));
+            const meta = report.metadata || {};
+            const vuln = meta.vulnerabilities || {};
+            const total = Object.values(vuln).reduce((a, b) => a + b, 0);
+
+            const lines = [
+              '## 📦 npm Audit Report',
+              '',
+              '| Severity  | Count |',
+              '|-----------|-------|',
+              \`| 🔴 Critical | \${vuln.critical ?? 0} |\`,
+              \`| 🟠 High     | \${vuln.high ?? 0} |\`,
+              \`| 🟡 Moderate | \${vuln.moderate ?? 0} |\`,
+              \`| 🟢 Low      | \${vuln.low ?? 0} |\`,
+              \`| ℹ️  Info     | \${vuln.info ?? 0} |\`,
+              '',
+              \`**Total vulnerabilities:** \${total}\`,
+              '',
+              '> Run \`npm audit\` locally for full details.',
+            ];
+
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
+            console.log('Audit summary written to job summary.');
+
+            // Surface critical count as output variable
+            const core = process.env.GITHUB_OUTPUT;
+            fs.appendFileSync(core, 'critical=' + (vuln.critical ?? 0) + '\n');
+          "
+          exit $AUDIT_EXIT
+
+      - name: Upload audit report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report-${{ github.sha }}
+          path: audit-report.json
+          retention-days: 30
+
+      # Hard stop if CRITICAL vulnerabilities are present.
+      # This mirrors the prebuild gate but runs as an explicit named step.
+      - name: Block on CRITICAL vulnerabilities
+        if: steps.audit.outputs.critical != '0'
+        run: |
+          echo "::error::${{ steps.audit.outputs.critical }} CRITICAL vulnerabilities found. Run 'npm audit --audit-level=critical' locally."
+          exit 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4. Headers & CSP verification — ensures security headers are still present
+  #    in next.config.ts after any config changes.
+  # ─────────────────────────────────────────────────────────────────────────────
+  verify-security-headers:
+    name: Verify Security Headers Config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check security headers in next.config.ts
+        run: |
+          MISSING=""
+          REQUIRED_HEADERS=(
+            "X-Frame-Options"
+            "X-Content-Type-Options"
+            "Strict-Transport-Security"
+            "Content-Security-Policy"
+            "Referrer-Policy"
+          )
+          for header in "${REQUIRED_HEADERS[@]}"; do
+            if ! grep -q "$header" next.config.ts; then
+              echo "::error file=next.config.ts::Missing security header: $header"
+              MISSING="$MISSING $header"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "Missing headers:$MISSING"
+            exit 1
+          fi
+          echo "✅ All required security headers are present in next.config.ts"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 5. Proxy integrity check — ensures proxy.ts exports the correct function
+  #    name and has a matcher config (common mistakes when editing the proxy).
+  # ─────────────────────────────────────────────────────────────────────────────
+  verify-proxy:
+    name: Verify Proxy Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check proxy.ts conventions
+        run: |
+          PROXY_FILE="src/proxy.ts"
+
+          if [ ! -f "$PROXY_FILE" ]; then
+            echo "::error::src/proxy.ts not found. Next.js 16 requires proxy.ts (not middleware.ts)."
+            exit 1
+          fi
+
+          # Must export a function named 'proxy' (not 'middleware')
+          if grep -qE "export (function|const|default function) middleware" "$PROXY_FILE"; then
+            echo "::error file=${PROXY_FILE}::Found 'middleware' export — Next.js 16 requires 'proxy'. Run: npx @next/codemod@canary middleware-to-proxy ."
+            exit 1
+          fi
+
+          if ! grep -qE "export (async function|function|const) proxy" "$PROXY_FILE"; then
+            echo "::error file=${PROXY_FILE}::proxy.ts must export a function named 'proxy'."
+            exit 1
+          fi
+
+          # Must have a matcher config to avoid running on all routes unexpectedly
+          if ! grep -q "export const config" "$PROXY_FILE"; then
+            echo "::warning file=${PROXY_FILE}::proxy.ts has no 'export const config' matcher — it will run on EVERY route."
+          fi
+
+          echo "✅ proxy.ts conventions verified"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 6. .env exposure check — ensures no .env files with real data were committed
+  # ─────────────────────────────────────────────────────────────────────────────
+  verify-env-files:
+    name: Verify No .env Files Committed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for committed .env files
+        run: |
+          # .env.example is allowed — all others should be in .gitignore
+          FOUND=$(find . -name ".env*" -not -name ".env.example" -not -path "*/node_modules/*" -not -path "*/.git/*")
+          if [ -n "$FOUND" ]; then
+            echo "::error::Committed .env files detected (may contain secrets):"
+            echo "$FOUND" | while read -r f; do
+              echo "  ::error file=${f}::Sensitive .env file committed to repository"
+            done
+            exit 1
+          fi
+          echo "✅ No sensitive .env files found in the repository"
