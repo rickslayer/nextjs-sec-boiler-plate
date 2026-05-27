@@ -5,7 +5,7 @@ description: |-
  Use this skill WHENEVER the work involves Next.js — creating pages, routes, layouts, components, forms, data fetching, authentication, middleware, configuration, or any file inside app/, pages/, or next.config.{js,ts,mjs}. Also applies when the user mentions "Next", "App Router", "Server Component", "Server Action", "use server", "use client", or asks to review/refactor code in Next.js projects. Ensures use of current Next.js 16 practices (App Router, Server Components by default, Server Actions, explicit caching, async APIs like cookies/headers/params/searchParams) without the user having to ask for it every time.
 ---
 
-# Next.js 16 — Purple Vault Skill
+# Next.js 16 — Next JS Minimal Security
 
 ## Step 0 — Always do this first
 
@@ -164,37 +164,8 @@ const items = await vaultService.getItems(uid)
 
 ### Tailwind & styling
 - Use Tailwind utility classes only — no inline styles, no CSS modules
-- Dark mode is the default theme; the design is purple-accented
 - Icons: `lucide-react` only, no other icon libraries
 - Do not add new UI dependencies without asking
-
----
-
-## Security constraints — never violate these
-
-1. **Never log sensitive values** — logger redacts `authorization`, `cookie`, `password`, `wrappedVaultKey`, `encryptedPayload`. Do not add new fields that bypass this.
-2. **Never store keys in localStorage** — only memory + sessionStorage, only access tokens, never vault keys or passphrases.
-3. **Never skip CSRF validation** — mutation endpoints must validate the `x-csrf-token` header against the cookie.
-4. **Never trust client-supplied UID** — always derive the UID from the verified JWT.
-5. **Rate limiting is applied in middleware** — do not add new sensitive endpoints without adding them to `src/lib/rateLimit.ts`.
-6. **Crypto stays client-side** — AES-256-GCM encryption/decryption of vault items happens in the browser. The server never sees plaintext vault data or the vault encryption key (VEK).
-
----
-
-## Database (Prisma 6 + MongoDB)
-
-- Client singleton: `src/lib/prisma.ts` — always import from there
-- BigInt timestamps: `createdAt`, `lastAccessedAt`, `expiresAt`, `timestamp` are BigInt — serialize before JSON responses
-- Relations use `uid` (Firebase UID string), not numeric IDs
-- Do not use `findUnique` with MongoDB — use `findFirst` with a unique field in `where`
-
-```ts
-// Wrong for MongoDB
-await prisma.user.findUnique({ where: { uid } })
-
-// Correct
-await prisma.user.findFirst({ where: { uid } })
-```
 
 ---
 
